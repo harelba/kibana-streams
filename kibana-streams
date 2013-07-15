@@ -151,7 +151,7 @@ def get_stream_configs(config_location):
 		logging.info("Configuration location is a URL. Fetching configuration data")
 		streams_config = get_json_data(options.config_location)
 	else:
-		streams_config = json.load(file(config_file))
+		streams_config = json.load(file(config_location))
 
 	logging.info("Streams configuration is %s" % str(streams_config))
 
