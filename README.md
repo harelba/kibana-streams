@@ -4,7 +4,7 @@ Kibana Streams is a tool which routes the counts of logstash events to a metric 
 The purpose of this tool is to provide similar capability to graylog's streams.
 
 ![Data from Kibana](example-graphs/kibana-example.png "Data from Kibana")
-![Data in graphite]("Data in graphite")
+![Data in graphite](example-graphs/graphite-example.png "Data in graphite")
 
 
 ## Configuration
