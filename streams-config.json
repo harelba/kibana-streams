@@ -1,0 +1,16 @@
+{ 
+	"streams" : [
+		{ 
+			"name"  : "cassandra_mark_host_as_down",
+			"description" : "Cassandra Mark host as down",
+			"query" : "@message:MARK AND @message:HOST AND @message:AS AND @message:DOWN",
+			"enabled" : "true"
+		},
+		{
+			"name" : "errors",
+			"description" : "Number of errors in logs",
+			"query" : "@fields.level:'ERROR'",
+			"enabled" : "true"
+		}
+	]
+}

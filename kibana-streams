@@ -1,0 +1,297 @@
+#!/usr/bin/python
+
+# Kibana Streams
+#
+#   Kibana Streams is a tool which routes the counts of logstash events to a metric backend, such as graphite, providing ongoing visibility and enables alerting.
+#
+#   The purpose of this tool is to provide similar capability to graylog's streams.
+#
+# Author: Harel Ben Attia, @harelba in twitter, harelba in github
+#
+
+import os,sys
+from datetime import datetime,timedelta
+import urllib2
+import json
+import base64
+from optparse import OptionParser
+import traceback
+import logging
+import logging.handlers
+import time
+
+def setup_logging():
+        FORMAT = '%(asctime)-15s %(levelname)s %(message)s'
+
+        log_folder = os.path.join(os.path.split(sys.argv[0])[0],'logs')
+        if not os.path.exists(log_folder):
+                os.makedirs(log_folder)
+        log_filename = os.path.join(os.path.split(sys.argv[0])[0],'logs',os.path.split(sys.argv[0])[1]+".log")
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+        handler = logging.handlers.RotatingFileHandler(log_filename,maxBytes=20000000,backupCount=5)
+        handler.setFormatter(logging.Formatter(FORMAT))
+        logger.addHandler(handler)
+
+def show_error_and_exit(msg,error_code=1,show_help=True):
+        logging.error(msg)
+        print >>sys.stderr,msg
+        if show_help:
+                parser.print_help()
+        sys.exit(error_code)
+
+def create_metric_client(client_type,params):
+	metric_client_module_name = 'metrics-client-%s' % client_type
+
+        if params is not None:
+                metric_client_params = dict([p.split("=",1) for p in params.split(",")])
+        else:
+                metric_client_params = {}
+
+        code_path = os.path.split(sys.argv[0])[0]
+	if not os.path.exists('%s/%s.py' % (code_path,metric_client_module_name)):
+                        show_error_and_exit("Unrecognized metric client type %s. cannot find %s" % (client_type,metric_client_module_name))
+	else:
+		try:
+			sys.path.append(code_path)
+			metric_client = __import__(metric_client_module_name)
+			logging.info("Using metric client %s" % client_type)
+			metric_client.initialize(metric_client_params)
+			logging.info("Metric client intiialized with params %s" % str(params))
+			return metric_client
+		except:
+			show_error_and_exit("Could not load metric client %s. module name %s not found. Traceback %s" % (client_type,metric_client_module_name,traceback.format_exc()))
+
+def get_json_data(url):
+	logging.info("Reading data from url %s" % url)
+        response = None
+        u = None
+        try:
+                u = urllib2.urlopen(url)
+                res = u.read()
+                response = json.loads(res)
+                return response
+        finally:
+                if u is not None:
+                        u.close()
+
+def materialize_metric_name_prefix(metric_name_prefix):
+        """
+        Convert prefix template to actual prefix.
+
+        TODO: More general approach. Currently only handling reverse hostnames
+        """
+        os_hostname = os.uname()[1]
+        if '.' in os_hostname:
+                name,domain = os_hostname.split(".",1)
+                domain = domain.replace(".","_")
+                HOSTNAME = "%s.%s" % (domain,name)
+        else:
+                HOSTNAME = 'unknown-domain.%s' % os_hostname
+
+        result = metric_name_prefix.replace("${HOSTNAME}",HOSTNAME)
+
+        if len(result) > 0 and result[-1] != '.':
+                result = result + "."
+
+        return result
+
+class StreamConfig(object):
+	def __init__(self,stream_config_dict):
+		self.stream_config_dict = stream_config_dict
+		self.name = stream_config_dict['name']
+		if 'description' in stream_config_dict:
+			self.description = stream_config_dict['description']
+		else:
+			self.description = self.name
+		self.query = stream_config_dict['query']
+		if 'enabled' in stream_config_dict:
+			self.enabled = bool(stream_config_dict['enabled'] == 'true')
+		else:
+			self.enabled = True
+
+	def __str__(self):
+		return "<name=%s,query=%s,enabled=%s>" % (self.name,self.query,self.enabled)
+	__repr__ = __str__
+
+class KibanaClient(object):
+	KIBANA_JSON_TEMPLATE = '{"search": "%(query)s","fields":[],"offset":0,"timeframe" : "custom","graphmode":"%(graphmode)s","time":{"from" : "%(from_time_str)s", "to" : "%(to_time_str)s", "user_interval":"%(user_interval)s"},"stamp":%(stamp)s}'
+	KIBANA_HTTP_TEMPLATE = "http://%(server)s:%(port)s/api/graph/count/%(user_interval)s/%(json)s/%(page)s?_=%(stamp)s"
+	def __init__(self,server,port):
+		self.server = server
+		self.port = port
+
+	def get_counts(self,query,from_time,to_time,time_resolution):
+		graphmode = 'count'
+		stamp = int(time.time())
+		user_interval = time_resolution * 1000
+		from_time_str = datetime.isoformat(from_time)
+		to_time_str = datetime.isoformat(to_time)
+		json = self.KIBANA_JSON_TEMPLATE % vars()
+		json = "".join(base64.encodestring(json).split("\n"))
+		server = self.server
+		port = self.port
+
+		responses = []
+		page = 0
+		while True:
+			http_url = self.KIBANA_HTTP_TEMPLATE % vars()
+			response = get_json_data(http_url)
+			responses += response['facets']['count']['entries']
+			if 'next' in response['kibana']:
+				page = response['kibana']['next']
+			else:
+				break
+
+		return responses
+		
+def get_stream_configs(config_location):
+
+	if config_location.startswith("http://"):
+		logging.info("Configuration location is a URL. Fetching configuration data")
+		streams_config = get_json_data(options.config_location)
+	else:
+		streams_config = json.load(file(config_file))
+
+	logging.info("Streams configuration is %s" % str(streams_config))
+
+	return [StreamConfig(sc) for sc in streams_config['streams']]
+
+def read_stream_data(kibana_client,stream_config,from_time,to_time,time_resolution):
+	stream_data = kibana_client.get_counts(stream_config.query,from_time,to_time,time_resolution)
+	return stream_data
+
+def find_datapoint(stream_data,expected_datapoint):
+	l = [x for x in stream_data if x['time'] == expected_datapoint]
+	if len(l) > 0:
+		return l[0]
+	else:
+		return None
+
+def add_metrics_for_stream(metric_client,metric_name_prefix,stream_config,stream_data,expected_datapoints):
+	# Skipping the first and last entries, since they're "cut in the middle" so they're not accurate
+	trimmed_stream_data = stream_data[1:-1]
+	logging.info("Adding %s metrics for stream %s" % (len(trimmed_stream_data),stream_config.name))
+	for expected_datapoint in expected_datapoints:
+		stream_datapoint = find_datapoint(trimmed_stream_data,expected_datapoint)
+		if stream_datapoint is None:
+			value = 0
+		else:
+			value = stream_datapoint['count']
+		metric_client.add_metric('%s.stream.%s.count' % (metric_name_prefix,stream_config.name),value,int(expected_datapoint/1000))
+	logging.info("Done adding metrics for stream %s" % stream_config.name)
+
+def add_metadata_as_metrics(metric_client,metric_name_prefix,reference_time,total_time,error_count):
+	metric_client.add_metric('%s.metadata.total_time' % metric_name_prefix,total_time,reference_time)
+	metric_client.add_metric('%s.metadata.error_count' % metric_name_prefix,error_count,reference_time)
+
+# Courtesy of Thierry Husson 2012
+def round_timestamp(dt,seconds_to_round_to=60):
+	seconds = (dt - dt.min).seconds
+	rounding = (seconds+seconds_to_round_to/2) // seconds_to_round_to * seconds_to_round_to
+	return dt + timedelta(0,rounding-seconds,-dt.microsecond)
+
+def generate_expected_datapoints(from_time,to_time,time_resolution):
+	l = []
+	c = from_time
+	while c < to_time:
+		l.append(int(time.mktime(c.timetuple()))*1000)
+		c = c + timedelta(0,time_resolution)
+	# Skip first and last, since we don't want to overrun them (they're incomplete)
+	return l[1:-1]
+	
+if __name__ == '__main__':
+        setup_logging()
+
+        parser = OptionParser()
+	parser.add_option("-s","--kibana2-server",dest="server",default='localhost',
+			help="Name of kibana2 server")
+	parser.add_option("-p","--kibana2-port",dest="port",default=5601,
+			help="Port of kibana2 server")
+	parser.add_option("-C","--metric-client-type",dest="metric_client_type",default=None,
+                        help="Type of metric client. currently supported types are 'stdout' and 'graphite'. The 'graphite' type requires the following client params (-P): 'host=X,port=Y'")
+	parser.add_option("-P","--metric-client-params",dest="metric_client_params",default=None,
+                        help="Comma separated list of parameters in the format x=y. Will be passed to the metric client")
+	parser.add_option("-r","--time-resolution",dest="time_resolution",default="60",
+			help="Time resolution, in seconds")
+	parser.add_option("-t","--timeframe",dest="timeframe",default="1800",
+			help="Timeframe in seconds to get the data from")
+
+	parser.add_option("-n","--metric-name-prefix",dest="metric_name_prefix",default=None,
+                        help="Prefix for all metrics. You can add ${HOSTNAME} in the prefix and it will be replaced with 'domain.hostname'. E.g. data.hadoop.jobtracker.${HOSTNAME} . Note that you'd need to use single quotes in the command line so the $ sign will not be parsed by the shell")
+	parser.add_option("-c","--config-location",dest="config_location",default=None,
+			help="Streams configuration file. Defaults to streams-config.json in the code folder. Can also be an http URL")
+
+	(options,args) = parser.parse_args()
+
+	if options.config_location is None:
+		options.config_location = os.path.join(os.path.split(sys.argv[0])[0],'streams-config.json')
+
+	if options.metric_client_type is None:
+		show_error_and_exit("Metric client type must be provided")
+
+	if options.metric_name_prefix is None:
+		show_error_and_exit("Metric name prefix must be provided")
+
+	try:
+		time_resolution = int(options.time_resolution)
+	except:
+		show_error_and_exit("time resolution must be a number")
+	try:
+		timeframe = int(options.timeframe)
+	except:
+		show_error_and_exit("timeframe must be a number")
+
+	kibana_client = KibanaClient(options.server,options.port)
+
+	try:
+		start_time = time.time()
+		error_count = 0
+
+		metric_client = create_metric_client(options.metric_client_type,options.metric_client_params)
+
+		logging.info("Getting stream configurations")
+		stream_configs = get_stream_configs(options.config_location)
+	
+		ref_time = datetime.now()
+		to_time = round_timestamp(ref_time,60)
+		from_time = to_time - timedelta(0,int(options.timeframe))
+
+		logging.info("Reference time is %s" % ref_time)
+		logging.info("From time is %s To time is %s" % (from_time,to_time))
+
+		expected_datapoints = generate_expected_datapoints(from_time,to_time,time_resolution)
+		
+		results = {}
+		for stream_config in stream_configs:
+			try:
+				if not stream_config.enabled:
+					continue
+
+				logging.info("Handling Stream config %s" % stream_config)
+				stream_data = read_stream_data(kibana_client,stream_config,from_time,to_time,time_resolution)
+				if len(stream_data) != 0:
+					logging.info("Stream data has been read for stream config %s. %s data points have been returned (first is %s last is %s)" % (stream_config,len(stream_data),stream_data[0]['time'],stream_data[-1]['time']))
+				else:
+					logging.info("Stream data has been read for stream config %s - No data points have been fetched" % stream_config)
+				results[stream_config] = stream_data
+				logging.info("Sending to metric backend")
+				add_metrics_for_stream(metric_client,options.metric_name_prefix,stream_config,stream_data,expected_datapoints)
+			except:
+				logging.error("Error while getting stream data for %s. Continuing to next stream. %s" % (stream_config,traceback.format_exc()))
+				error_count += 1
+
+		logging.info("All stream data has been read.")
+
+
+		total_time = time.time() - start_time
+
+		add_metadata_as_metrics(metric_client,options.metric_name_prefix,int(start_time),total_time,error_count)
+
+		metric_client.done()
+
+		logging.info("Done sending all stream data to the metric backend. Total time is %4.3f, error count is %s" % (total_time,error_count))
+
+	except:
+		print >>sys.stderr,traceback.format_exc()
+		logging.error("Failed processing the streams. %s" % traceback.format_exc())
