@@ -122,6 +122,7 @@ class KibanaClient(object):
 		self.port = port
 
 	def get_counts(self,query,from_time,to_time,time_resolution):
+		query = query.replace('"','\\"')
 		graphmode = 'count'
 		stamp = int(time.time())
 		user_interval = time_resolution * 1000
