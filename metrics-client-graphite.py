@@ -15,7 +15,7 @@ def initialize(params):
 	global graphite_server
 	global graphite_port
 	try:
-		print params
+		logging.info("Initializing graphite plugin with parameters %s" % str(params))
 		graphite_server = params['server']
 		graphite_port = int(params['port'])
 	except Exception,e:

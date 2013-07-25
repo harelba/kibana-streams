@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env /usr/bin/python2max
 
 # Kibana Streams
 #
@@ -114,8 +114,12 @@ class StreamConfig(object):
 		return "<name=%s,query=%s,enabled=%s>" % (self.name,self.query,self.enabled)
 	__repr__ = __str__
 
+def get_total_seconds(td): 
+	return (td.microseconds + (td.seconds + td.days * 24 * 3600) * 1e6) / 1e6
+
 class KibanaClient(object):
-	KIBANA_JSON_TEMPLATE = '{"search": "%(query)s","fields":[],"offset":0,"timeframe" : "custom","graphmode":"%(graphmode)s","time":{"from" : "%(from_time_str)s", "to" : "%(to_time_str)s", "user_interval":"%(user_interval)s"},"stamp":%(stamp)s}'
+	KIBANA_JSON_TEMPLATE = '{"search": "%(query)s","fields":[],"offset":0,"timeframe" : "custom","graphmode":"%(graphmode)s","time":{"from" : "%(from_time_str)s", "to" : "%(to_time_str)s" , "user_interval" : "%(user_interval)s" },"stamp":%(stamp)s}'
+	#KIBANA_JSON_TEMPLATE = '{"search": "%(query)s","fields":[],"offset":0,"timeframe" : "custom","graphmode":"%(graphmode)s","time":{"from" : "%(from_time_str)s", "to" : "%(to_time_str)s", "user_interval":"%(user_interval)s"},"stamp":%(stamp)s}'
 	KIBANA_HTTP_TEMPLATE = "http://%(server)s:%(port)s/api/graph/count/%(user_interval)s/%(json)s/%(page)s?_=%(stamp)s"
 	def __init__(self,server,port):
 		self.server = server
@@ -124,7 +128,7 @@ class KibanaClient(object):
 	def get_counts(self,query,from_time,to_time,time_resolution):
 		query = query.replace('"','\\"')
 		graphmode = 'count'
-		stamp = int(time.time())
+		stamp = int(time.time()*1000)
 		user_interval = time_resolution * 1000
 		from_time_str = datetime.isoformat(from_time)
 		to_time_str = datetime.isoformat(to_time)
@@ -138,6 +142,7 @@ class KibanaClient(object):
 		while True:
 			http_url = self.KIBANA_HTTP_TEMPLATE % vars()
 			response = get_json_data(http_url)
+			logging.info("Response %s" % str(response))
 			responses += response['facets']['count']['entries']
 			if 'next' in response['kibana']:
 				page = response['kibana']['next']
@@ -170,11 +175,9 @@ def find_datapoint(stream_data,expected_datapoint):
 		return None
 
 def add_metrics_for_stream(metric_client,metric_name_prefix,stream_config,stream_data,expected_datapoints):
-	# Skipping the first and last entries, since they're "cut in the middle" so they're not accurate
-	trimmed_stream_data = stream_data[1:-1]
-	logging.info("Adding %s metrics for stream %s" % (len(trimmed_stream_data),stream_config.name))
+	logging.info("Adding %s metrics for stream %s" % (len(stream_data),stream_config.name))
 	for expected_datapoint in expected_datapoints:
-		stream_datapoint = find_datapoint(trimmed_stream_data,expected_datapoint)
+		stream_datapoint = find_datapoint(stream_data,expected_datapoint)
 		if stream_datapoint is None:
 			value = 0
 		else:
